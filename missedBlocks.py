@@ -20,6 +20,13 @@ RPC_ADDRESS = 'https://rpc.fuse.io'
 web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
 fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
 
+messageToSendToBot = "Hello!, I'm the down detector bot I will let you know if any nodes skip blocks :)"
+botMessage = 'https://api.telegram.org/bot' + teleBotSettings["BOT_KEY"] + '/sendMessage?chat_id=' + \
+                     teleBotSettings["CHAT_ID"] + '&text=' + messageToSendToBot
+
+response = requests.get(botMessage)
+jsonResponse = response.json()
+
 activeValidator = fuseConsensusContract.functions.getValidators().call()
 
 valList = {}
@@ -49,6 +56,11 @@ for val in valList:
         timeSentLastErrors[val] = 0
         f = open("lastPublished.txt", "a+")
         f.write(val + "=0\n")
+        messageToSendToBot = "We have a new Validator! welcome:" + val + "%0A"
+        botMessage = 'https://api.telegram.org/bot' + teleBotSettings["BOT_KEY"] + '/sendMessage?chat_id=' + \
+                     teleBotSettings["CHAT_ID"] + '&text=' + messageToSendToBot
+        response = requests.get(botMessage)
+        jsonResponse = response.json()
         f.close()
 
     if (int(time.time()) - timeSentLastErrors[val] > (int(teleBotSettings['TIMEOUT']) * 60 * 60)):
