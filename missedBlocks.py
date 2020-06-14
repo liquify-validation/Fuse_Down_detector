@@ -20,13 +20,6 @@ RPC_ADDRESS = 'https://rpc.fuse.io'
 web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
 fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
 
-messageToSendToBot = "Hello!, I'm the down detector bot I will let you know if any nodes skip blocks :)"
-botMessage = 'https://api.telegram.org/bot' + teleBotSettings["BOT_KEY"] + '/sendMessage?chat_id=' + \
-                     teleBotSettings["CHAT_ID"] + '&text=' + messageToSendToBot
-
-response = requests.get(botMessage)
-jsonResponse = response.json()
-
 activeValidator = fuseConsensusContract.functions.getValidators().call()
 
 valList = {}
@@ -38,6 +31,11 @@ if not os.path.exists('lastPublished.txt'):
     for val in valList:
         f.write(val + "=0\n")
     f.close()
+    messageToSendToBot = "Hello!, I'm the down detector bot I will let you know if any nodes skip blocks :)"
+    botMessage = 'https://api.telegram.org/bot' + teleBotSettings["BOT_KEY"] + '/sendMessage?chat_id=' + \
+                 teleBotSettings["CHAT_ID"] + '&text=' + messageToSendToBot
+    response = requests.get(botMessage)
+    jsonResponse = response.json()
 
 timeSentLastErrors = {}
 with open("lastPublished.txt") as f:
@@ -65,14 +63,20 @@ for val in valList:
 
     if (int(time.time()) - timeSentLastErrors[val] > (int(teleBotSettings['TIMEOUT']) * 60 * 60)):
         if valList[val] == 0:
-            for i in range(blockNumber - (len(activeValidator)*int(teleBotSettings['DEADFOR'])), blockNumber - 50000, -1):
+            foundLastBlock = False
+            for i in range(blockNumber - (len(activeValidator)*int(teleBotSettings['DEADFOR'])), blockNumber - 5000, -1):
                 blockDetails = web3Fuse.eth.getBlock(i)
                 if(blockDetails['miner'] == val):
+                    foundLastBlock = True
                     break
             print("last trans at block " + str(i))
             #signal some error
 
-            messageToSendToBot = "Validator: " + val + " has not mined a block since block " + str(i) + " (" + str(blockNumber - i) + " blocks ago)" + "%0A"
+            if(foundLastBlock):
+                messageToSendToBot = "Validator: " + val + " has not mined a block since block " + str(i) + " (" + str(web3Fuse.eth.blockNumber - i) + " blocks ago)!" + "%0A"
+            else:
+                messageToSendToBot = "Validator: " + val + " has not mined for over 5000 blocks! %0A"
+
             botMessage = 'https://api.telegram.org/bot' + teleBotSettings["BOT_KEY"] + '/sendMessage?chat_id=' + \
                          teleBotSettings["CHAT_ID"] + '&text=' + messageToSendToBot
 
