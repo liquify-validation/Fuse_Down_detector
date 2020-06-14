@@ -1,4 +1,5 @@
-import os.path
+#!/usr/bin/env python3
+import os
 import configparser
 import requests
 from web3 import Web3
@@ -10,9 +11,12 @@ import time
 
 debugPrints = False
 
+__location__ = os.path.realpath(
+    os.path.join(os.getcwd(), os.path.dirname(__file__)))
+
 config = configparser.ConfigParser()
 config.optionxform=str
-config.read("settings.ini")
+config.read(os.path.join(__location__,"settings.ini"))
 
 teleBotSettings = dict(config.items('BOT'))
 
@@ -26,8 +30,8 @@ valList = {}
 for val in activeValidator:
     valList[val] = 0
 
-if not os.path.exists('lastPublished.txt'):
-    f = open("lastPublished.txt", "w")
+if not os.path.exists(os.path.join(__location__, 'lastPublished.txt')):
+    f = open(os.path.join(__location__, "lastPublished.txt"), "w")
     for val in valList:
         f.write(val + "=0\n")
     f.close()
@@ -38,7 +42,7 @@ if not os.path.exists('lastPublished.txt'):
     jsonResponse = response.json()
 
 timeSentLastErrors = {}
-with open("lastPublished.txt") as f:
+with open(os.path.join(__location__, "lastPublished.txt")) as f:
     for line in f:
         (key, val) = line.split('=')
         timeSentLastErrors[key] = int(val)
@@ -52,7 +56,7 @@ for block in range(blockNumber, blockNumber - (len(activeValidator)*int(teleBotS
 for val in valList:
     if val not in timeSentLastErrors:
         timeSentLastErrors[val] = 0
-        f = open("lastPublished.txt", "a+")
+        f = open(os.path.join(__location__, "lastPublished.txt"), "a+")
         f.write(val + "=0\n")
         messageToSendToBot = "We have a new Validator! welcome:" + val + "%0A"
         botMessage = 'https://api.telegram.org/bot' + teleBotSettings["BOT_KEY"] + '/sendMessage?chat_id=' + \
@@ -83,7 +87,7 @@ for val in valList:
             response = requests.get(botMessage)
             jsonResponse = response.json()
 
-            for line in fileinput.input("lastPublished.txt", inplace=True):
+            for line in fileinput.input(os.path.join(__location__, "lastPublished.txt"), inplace=True):
                 if line.strip().startswith(val):
                     line = val + '=' + str(int(time.time())) + '\n'
                 sys.stdout.write(line)
