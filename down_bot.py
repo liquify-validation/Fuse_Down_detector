@@ -9,6 +9,7 @@ from multiprocessing import Queue
 import queue
 from web3 import Web3
 from threading import Thread
+import time
 
 debug = True
 defaultKey = ''
@@ -53,7 +54,22 @@ class DownBot:
 
         self.collectedSigData = []
 
+        self.settings['ActiveBallots'] = {}
+        self.fillActiveBallots(getOpenBallots())
 
+
+    def fillActiveBallots(self, ballots):
+        if ballots == None:
+            self.settings['ActiveBallots'] = {}
+            return
+
+        for ballot in ballots:
+            if ballot not in self.settings['ActiveBallots']:
+                self.settings['ActiveBallots'][ballot] = {}
+                self.settings['ActiveBallots'][ballot]['startBlock'] = ballots[ballot]['startBlock']
+                self.settings['ActiveBallots'][ballot]['endBlock'] = ballots[ballot]['startBlock']
+                self.settings['ActiveBallots'][ballot]['disc'] = ballots[ballot]['startBlock']
+                self.settings['ActiveBallots'][ballot]['resultsLastSent'] = 0
 
     def parseSettings(self):
         """Function is called at start up to read bot settings data from a file (if present), if not it builds the dicts from scratch
@@ -207,6 +223,25 @@ class DownBot:
                 message = user + " node: " + address + " was meant to relay to mainnet but still hasen't previous cycle ended ~3hours ago"
                 self.bot.send_message(self.settings["ChatID"], message)
 
+    def displayBallot(self, blockNumber):
+        for ballot in self.settings['ActiveBallots']:
+            if blockNumber > self.settings['ActiveBallots'][ballot]['endBlock']:
+                #ballot has closed
+                resStr = getBallotResults()
+                self.bot.send_message(self.settings["ChatID"], "Ballot " + str(ballot) + " has now closed final results = " + resStr)
+                del self.settings['ActiveBallots'][ballot]
+            elif blockNumber > self.settings['ActiveBallots'][ballot]['startBlock'] and int(time.time()) > (self.settings['ActiveBallots'][ballot]['resultsLastSent'] + (60*60*24)):
+                if self.settings['ActiveBallots'][ballot]['resultsLastSent'] != 0:
+                    resStr = getBallotResults()
+                    self.bot.send_message(self.settings["ChatID"],
+                                          "Ballot " + str(ballot) + " results so far = " + resStr)
+                else:
+                    self.bot.send_message(self.settings["ChatID"],"A new ballot is now open for voting until block: " + str(self.settings['ActiveBallots'][ballot]['endBlock']) + "\nBallot ID = " + str(ballot) + "\nDiscription: " + str(self.settings['ActiveBallots'][ballot]['disc']))
+
+                self.settings['ActiveBallots'][ballot]['resultsLastSent'] = int(time.time())
+
+
+
     def checkBlockQueue(self):
         lastSet = {}
         if self.blockQueue.qsize() >= self.numberOfNodes:
@@ -230,13 +265,22 @@ class DownBot:
                     else:
                         lastSet[blockDetails['miner']]['count'] += 1
                         lastSet[blockDetails['miner']]['lastBlock'] = blockDetails['block']
-                if int(blockDetails['block']) > (int(self.currentEndOfCycle) + 100):
+
+                self.displayBallot(blockDetails['block'])
+
+                if int(blockDetails['block']) > (int(self.currentEndOfCycle) + 300):
                     self.collectedSigData = grabDataFromGraphQL()
                     if( int(self.collectedSigData[0]['blockNumber']) > (int(self.currentEndOfCycle)) and int(self.collectedSigData[1]['blockNumber']) > (int(self.currentEndOfCycle))):
                         #if we are 100 blocks passed the last end of cycle then grab the new end of cycle block
                         self.currentEndOfCycle = getEndOfCycleBlock()
                         #create a thread which will wait 2hours before checking that the blocks have been relayed
-                        Thread(target=self.checkEndOfCycle).start()
+                        #Thread(target=self.checkEndOfCycle).start()
+                    else:
+                        self.bot.send_message(self.settings["ChatID"],"ERROR: Failed to relay end of cycle on fuse net within 300 blocks!")
+
+                    #check to see if a vote is open
+                    self.fillActiveBallots(getOpenBallots())
+
 
                 for node in self.nodes:
                     if node not in lastSet:
@@ -250,21 +294,22 @@ class DownBot:
 
 
     def checkBalance(self):
-        for node in self.nodes:
-            balance = getBalance(node)
-            message = ''
-            if balance['eth'] <= self.settings["EthWarning"]:
-                message += 'Eth balance low (' + str(balance['eth']) + ')\n'
-            if balance['fuse'] <= self.settings['FuseWarning']:
-                message += 'Fuse balance low (' + str(balance['fuse']) + ')\n'
-
-            if message != '':
-                user = ''
-                if 'username' in self.nodes[node]:
-                    user = '@' + self.nodes[node]['username']
-
-                message = user + ' ' + str(node) + '\n' + message
-                self.bot.send_message(self.settings["ChatID"], message)
+        test = 1
+        # for node in self.nodes:
+        #     balance = getBalance(node)
+        #     message = ''
+        #     if balance['eth'] <= self.settings["EthWarning"]:
+        #         message += 'Eth balance low (' + str(balance['eth']) + ')\n'
+        #     if balance['fuse'] <= self.settings['FuseWarning']:
+        #         message += 'Fuse balance low (' + str(balance['fuse']) + ')\n'
+        #
+        #     if message != '':
+        #         user = ''
+        #         if 'username' in self.nodes[node]:
+        #             user = '@' + self.nodes[node]['username']
+        #
+        #         message = user + ' ' + str(node) + '\n' + message
+        #         self.bot.send_message(self.settings["ChatID"], message)
 
     def start(self):
         updater = Updater(token=self.settings["BOTKey"], use_context=True)

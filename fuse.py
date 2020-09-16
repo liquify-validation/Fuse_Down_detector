@@ -8,6 +8,7 @@ import requests
 from etherscan.accounts import Account
 from multiprocessing import Queue
 import calendar
+import votingABI
 
 
 HOURS_TO_SEARCH_BACK = 3
@@ -40,28 +41,36 @@ def getBalance(node):
 def log_loop(web3Fuse, poll_interval,blockQueue):
     oldBlockNumber = 0
     while True:
-        newBlock = web3Fuse.eth.blockNumber
-        if (oldBlockNumber != newBlock):
-            block = web3Fuse.eth.getBlock(newBlock)
-            blockDetails = {}
-            blockDetails['block'] = newBlock
-            blockDetails['miner'] = block['miner']
-            blockDetails['timeStamp'] = block['timestamp']
-            blockQueue.put(blockDetails)
-            #print(newBlock)
-            #print(web3Fuse.eth.getBlock(newBlock)['miner'])
-            oldBlockNumber = newBlock
-        time.sleep(poll_interval)
+        try:
+            newBlock = web3Fuse.eth.blockNumber
+            if (oldBlockNumber != newBlock):
+                if oldBlockNumber + 1 != newBlock:
+                    print("missedBlocks")
+
+                time.sleep(0.4)
+                block = web3Fuse.eth.getBlock(newBlock)
+                blockDetails = {}
+                blockDetails['block'] = newBlock
+                blockDetails['miner'] = block['miner']
+                blockDetails['timeStamp'] = block['timestamp']
+                blockQueue.put(blockDetails)
+                #print(newBlock)
+                #print(web3Fuse.eth.getBlock(newBlock)['miner'])
+                oldBlockNumber = newBlock
+            time.sleep(poll_interval)
+        except ConnectionError:
+            print("Caught connection exception")
+            time.sleep(0.5)
 
 def createBlockThread(blockQueue):
     web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
-    worker = Thread(target=log_loop, args=(web3Fuse, 1, blockQueue), daemon=True)
+    worker = Thread(target=log_loop, args=(web3Fuse, 1.5, blockQueue), daemon=True)
     worker.start()
 
 def getEndOfCycleBlock():
     web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
     fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
-    endOfCycleBlockNum = fuseConsensusContract.functions.getCurrentCycleEndBlock ().call()
+    endOfCycleBlockNum = fuseConsensusContract.functions.getCurrentCycleEndBlock().call()
     return endOfCycleBlockNum
 
 def grabDataFromGraphQL():
@@ -89,3 +98,50 @@ def checkIfRelayed(address):
                 break;
 
     return relayed
+
+def getOpenBallots():
+    web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
+    fuseVotingContract = web3Fuse.eth.contract(abi=votingABI.VOTING_ABI, address=votingABI.VOTING_ADDR)
+    activeBallots = fuseVotingContract.functions.activeBallots().call()
+    if len(activeBallots) != 0:
+        returnData = {}
+        for ballot in activeBallots:
+            returnData[ballot] = {}
+            ballotInfo = fuseVotingContract.functions.getBallotInfo(ballot,Web3.toChecksumAddress('0x3014ca10b91cb3D0AD85fEf7A3Cb95BCAc9c0f79')).call()
+            returnData[ballot]['startBlock'] = ballotInfo[0]
+            returnData[ballot]['endBlock'] = ballotInfo[1]
+            returnData[ballot]['disc'] = ballotInfo[6]
+
+        return returnData
+    else:
+        return None
+
+def getBallotResults(ballotID):
+    web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
+    fuseVotingContract = web3Fuse.eth.contract(abi=votingABI.VOTING_ABI, address=votingABI.VOTING_ADDR)
+    fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
+
+    activeValidator = fuseConsensusContract.functions.getValidators().call()
+
+    forVote = 0
+    againstVote = 0
+    abstained = 0
+
+    totalValidators = len(activeValidator)
+
+    for address in activeValidator:
+        voted = fuseVotingContract.functions.getVoterChoice(int(ballotID), address).call()
+        time.sleep(0.1)
+        if voted == 0:
+            abstained += 1
+        elif voted == 1:
+            forVote += 1
+        elif voted == 2:
+            againstVote += 1
+
+    stringToRet = "total Validators = " + str(totalValidators) + " For = " + str(forVote) + " (" + str(
+        (forVote / totalValidators) * 100) + '%) , Against = ' + str(againstVote) + " (" + str(
+        (againstVote / totalValidators) * 100) + '%) , Abstained = ' + str(abstained) + " (" + str(
+        (abstained / totalValidators) * 100) + '%)'
+
+    return stringToRet
