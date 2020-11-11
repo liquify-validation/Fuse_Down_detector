@@ -1,0 +1,15 @@
+<!DOCTYPE HTML>
+<html lang="en">
+    <head>
+        <title>Fuse Network Bot</title>
+    </head>
+    <body>
+        <h1>Fuse Network Bot</h1>
+	<p>The Fuse Network Bot and Bot API allow for easy management of validators and Provides endpoints to useful network information.</p>
+	<ul>
+            {% for url, endpoint in links %}
+	    <li><a href="{{ url }}">{{ endpoint }}</a></li>
+	    {% endfor %}
+        </ul>    
+    </body>
+</html>

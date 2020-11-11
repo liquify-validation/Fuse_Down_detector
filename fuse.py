@@ -9,7 +9,8 @@ from etherscan.accounts import Account
 from multiprocessing import Queue
 import calendar
 import votingABI
-
+import errno
+from socket import error as socket_error
 
 HOURS_TO_SEARCH_BACK = 3
 
@@ -38,6 +39,63 @@ def getBalance(node):
 
     return balance
 
+def checkAddressIsValid(address):
+    checkSumAddr = Web3.toChecksumAddress(address)
+    return Web3.isAddress(checkSumAddr)
+
+def getTotalSupply(block):
+    initSupply = 300000000
+    blocksPerYear = 6307200
+
+    firstYearReward = 15000000/blocksPerYear
+    secondYearReward = firstYearReward * 1.05
+
+    totalSupply = initSupply + ((blocksPerYear - 100) * firstYearReward) + ((block - blocksPerYear) * secondYearReward)
+
+    return totalSupply
+
+def getCircSupply(totalSupply, block, lockedAccountsList):
+    circSupplyFuse = totalSupply
+
+    RPC_ADDRESS = 'https://rpc.fuse.io'
+    DECIMAL = 10 ** 18
+    web3Eth = Web3(Web3.HTTPProvider(""))
+    web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
+    CONTRACT_ADDRESS = "0x970B9bB2C0444F5E81e9d0eFb84C8ccdcdcAf84d"
+    WFUSE_CONTRACT = "0x0BE9e53fd7EDaC9F859882AfdDa116645287C629"
+    wfuseWallet = Web3.toChecksumAddress("0xD418c5d0c4a3D87a6c555B7aA41f13EF87485Ec6")
+    tokenContract = web3Eth.eth.contract(abi=contractABI.TOKEN_CONTRACT_ABI, address=CONTRACT_ADDRESS)
+    wrappedFuseContract = web3Fuse.eth.contract(abi=contractABI.TOKEN_CONTRACT_ABI, address=WFUSE_CONTRACT)
+
+    totalSupplyMainnet = float(tokenContract.functions.totalSupply().call() / DECIMAL)
+
+
+    for address in lockedAccountsList:
+        addr = Web3.toChecksumAddress(address)
+        fusenetBalance = float(web3Fuse.eth.getBalance(addr) / DECIMAL)
+        circSupplyFuse = circSupplyFuse - fusenetBalance
+    
+    wFuseAmount = float(wrappedFuseContract.functions.balanceOf(wfuseWallet).call() / DECIMAL)
+
+    circSupplyFuse = circSupplyFuse - wFuseAmount
+    
+    circSupplyMain = totalSupplyMainnet
+
+    for address in lockedAccountsList:
+        addr = Web3.toChecksumAddress(address)
+        mainnetBalance = float(tokenContract.functions.balanceOf(addr).call() / DECIMAL)
+        circSupplyMain = circSupplyMain - mainnetBalance
+
+    returnDict = {}
+    returnDict['fuseBlock'] = block
+    returnDict['ethereumBlock'] = web3Eth.eth.blockNumber
+    returnDict['total'] = circSupplyFuse + circSupplyMain
+    returnDict['onFuseNetwork'] = circSupplyFuse
+    returnDict['onEtherumNetwork'] = circSupplyMain
+
+    return returnDict
+
+
 def log_loop(web3Fuse, poll_interval,blockQueue):
     oldBlockNumber = 0
     while True:
@@ -54,11 +112,9 @@ def log_loop(web3Fuse, poll_interval,blockQueue):
                 blockDetails['miner'] = block['miner']
                 blockDetails['timeStamp'] = block['timestamp']
                 blockQueue.put(blockDetails)
-                #print(newBlock)
-                #print(web3Fuse.eth.getBlock(newBlock)['miner'])
                 oldBlockNumber = newBlock
             time.sleep(poll_interval)
-        except ConnectionError:
+        except socket_error as serr:
             print("Caught connection exception")
             time.sleep(0.5)
 
@@ -71,6 +127,12 @@ def getEndOfCycleBlock():
     web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
     fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
     endOfCycleBlockNum = fuseConsensusContract.functions.getCurrentCycleEndBlock().call()
+    return endOfCycleBlockNum
+
+def getStartOfCycleBlock():
+    web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
+    fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
+    endOfCycleBlockNum = fuseConsensusContract.functions.getCurrentCycleStartBlock().call()
     return endOfCycleBlockNum
 
 def grabDataFromGraphQL():
