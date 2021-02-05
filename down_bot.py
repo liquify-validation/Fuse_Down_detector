@@ -17,6 +17,14 @@ from flask_cors import CORS, cross_origin
 from PIL import Image
 import numpy as np
 import copy
+import datetime
+import matplotlib.pyplot as plt
+import logging
+import requests
+import collections
+
+log = logging.getLogger('werkzeug')
+log.setLevel(logging.ERROR)
 
 debug = True
 defaultKey = ''
@@ -30,13 +38,15 @@ HOURS_TO_WAIT = 3
 
 chatSettingsFile = "settings.json"
 nodeList = "nodes.json"
+pendingNodeList = "pendingNodes.json"
 nodeListOld = "nodes_old.json"
+transactionData = 'transactions.json'
 
 def printLogs(message):
     if debug:
         print(message)
 
-command_list = ['update_admins','info','set_eth_warning','set_fuse_warning','add_node','remove_node','set_dead_time','add_name','add_website','add_contact','override_info','set_delegation','set_photo','remove_delegation','set_photo_override','add_locked_account','remove_locked_account','get_locked_account']
+command_list = ['update_admins','info','set_eth_warning','set_fuse_warning','add_node','remove_node','set_dead_time','add_name','add_website','add_contact','override_info','set_delegation','set_photo','remove_delegation','set_photo_override','add_locked_account','remove_locked_account','get_locked_account', 'update_admins', 'register_status']
 __location__ = os.path.realpath(
     os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
@@ -44,11 +54,13 @@ app = Flask(__name__)
 cors = CORS(app)
 app.config['CORS_HEADERS'] = 'Content-Type'
 
+yesterday = ''
+
 Leon = ""
 Andy = ""
 Mark = ""
 
-
+ROLLING_AVG_MAX = 20000
 
 class DownBot:
     def __init__(self):
@@ -59,6 +71,7 @@ class DownBot:
         self.parseSettings()
         self.parseNodes()
         self.parseOldNodes()
+        self.parseStats()
         #self.settings["lockedAccounts"] = []
     
         self.lastCheck = time.time()
@@ -67,6 +80,11 @@ class DownBot:
         self.grabAdmins(self.bot)
         self.grabValidators()
         self.blockQueue = Queue()
+
+        self.timeStampDeque = collections.deque(maxlen=5000)
+        self.rollingBlockTime = 0.0
+        self.avgBlockTime = 0.0
+        self.oldTimeStamp = -1
 
         self.currentEndOfCycle = getEndOfCycleBlock()
 
@@ -86,10 +104,80 @@ class DownBot:
         self.stats['totalSupply'] = {}
         self.stats['totalSupply']['block'] = 0
         self.stats['totalSupply']['supply'] = 0
-        
+
         self.stats['circSupply'] = {}
 
+        self.errors = {}
+        self.errors['rpc'] = 0
+        self.errors['bot'] = 0
+
+        self.numberOfDelegates = 0
+        self.APY = 0
+        
         self.fillSupplies()
+        self.daily()
+
+    def daily(self):
+        today = datetime.datetime.fromtimestamp(time.time())
+        todayStr = str(today.day) + str(today.month) + str(today.year)
+        if todayStr not in self.blockStats['dates']:
+            self.blockStats['dates'][todayStr] = {}
+            self.blockStats['dates'][todayStr]['totalTransactions'] = 0
+            self.blockStats['dates'][todayStr]['totalGasUsed'] = 0
+            self.blockStats['dates'][todayStr]['times'] = {}
+
+            for i in range (0,24):
+                self.blockStats['dates'][todayStr]['times'][str(i)] = {}
+                self.blockStats['dates'][todayStr]['times'][str(i)]['transactions'] = 0
+                self.blockStats['dates'][todayStr]['times'][str(i)]['gasUsed'] = 0
+                self.blockStats['dates'][todayStr]['times'][str(i)]['startBlock'] = 0
+                self.blockStats['dates'][todayStr]['times'][str(i)]['endBlock'] = 0
+
+            if self.blockStats['yesterday'] != '':
+                timeYesterday = datetime.datetime.fromtimestamp(time.time() - 60*60)
+                dayYesterday = today.strftime('%A')
+                monthYesterday = str(timeYesterday.month)
+
+                if dayYesterday not in self.blockStats['dayOfWeek']:
+                    self.blockStats['dayOfWeek'][dayYesterday] = {}
+                    self.blockStats['dayOfWeek'][dayYesterday]['totalTransactions'] = 0
+                    self.blockStats['dayOfWeek'][dayYesterday]['totalGasUsed'] = 0
+
+                if monthYesterday not in self.blockStats['month']:
+                    self.blockStats['month'][monthYesterday] = {}
+                    self.blockStats['month'][monthYesterday]['totalTransactions'] = 0
+                    self.blockStats['month'][monthYesterday]['totalGasUsed'] = 0
+
+                self.blockStats['dayOfWeek'][dayYesterday]['totalTransactions'] += self.blockStats['dates'][self.blockStats['yesterday']]['totalTransactions']
+                self.blockStats['dayOfWeek'][dayYesterday]['totalGasUsed'] += self.blockStats['dates'][self.blockStats['yesterday']]['totalGasUsed']
+                self.blockStats['month'][monthYesterday]['totalTransactions'] += self.blockStats['dates'][self.blockStats['yesterday']]['totalTransactions']
+                self.blockStats['month'][monthYesterday]['totalGasUsed'] += self.blockStats['dates'][self.blockStats['yesterday']]['totalGasUsed']
+
+            self.generatePlots()
+            self.blockStats['yesterday'] = todayStr
+
+            self.saveSettings(self.blockStats, transactionData)
+
+    def generatePlots(self):
+        plots = ['transactions','gasUsed']
+        for plot in plots:
+            ypos = [0 for _ in range(24)]
+            y_pos = np.arange(24)
+
+            for key in self.blockStats['dates'][self.blockStats['yesterday']]['times']:
+                try:
+                    print(str(key))
+                    ypos[int(key)] = (self.blockStats['dates'][str(self.blockStats['yesterday'])]['times'][str(key)][str(plot)])
+                except (TypeError):
+                    print("type error")
+
+            plt.bar(y_pos, ypos, align='center', alpha=0.5)
+            plt.xticks(y_pos)
+            plt.ylabel(plot)
+            plt.title(plot + " on " + self.blockStats['yesterday'])
+            pltString = "plots/" + plot + self.blockStats['yesterday'] + '.png'
+            plt.savefig(pltString, dpi=300)
+            plt.clf()
 
     def fillSupplies(self):
         block = getStartOfCycleBlock()
@@ -98,6 +186,9 @@ class DownBot:
 
         circ = getCircSupply(self.stats['totalSupply']['supply'], block, self.settings["lockedAccounts"])
         self.stats['circSupply'] = copy.deepcopy(circ)
+
+        self.numberOfDelegates = getTotalDelegates()
+        self.APY = ((43150)/self.stats['circSupply']['staked']) * 100 * 365 * 0.85
 
     def fillActiveBallots(self, ballots):
         if ballots == None:
@@ -144,9 +235,21 @@ class DownBot:
             for node in self.nodes:
                 if 'forDelegation' not in self.nodes[node]:
                     self.nodes[node]['forDelegation'] = 0
+                if 'rollingAvgCount' not in self.nodes[node]:
+                    self.nodes[node]['rollingAvgCount'] = 0
+                if 'rollingAvgTotal' not in self.nodes[node]:
+                    self.nodes[node]['rollingAvgTotal'] = 0
             self.saveSettings(self.nodes, nodeList)
         else:
             self.nodes = {}
+
+        if os.path.exists(os.path.join(__location__, pendingNodeList)):
+            printLogs("loading Nodes")
+            with open(pendingNodeList) as json_file:
+                self.pendingNodes = json.load(json_file)
+            self.saveSettings(self.pendingNodes, pendingNodeList)
+        else:
+            self.pendingNodes = {}
 
     def parseOldNodes(self):
         if os.path.exists(os.path.join(__location__, nodeListOld)):
@@ -157,6 +260,18 @@ class DownBot:
         else:
             self.nodesOld = {}
 
+    def parseStats(self):
+        if os.path.exists(os.path.join(__location__, transactionData)):
+            printLogs("loading transaction data")
+            with open(transactionData) as json_file:
+                self.blockStats = json.load(json_file)
+        else:
+            self.blockStats = {}
+            self.blockStats['dates'] = {}
+            self.blockStats['dayOfWeek'] = {}
+            self.blockStats['month'] = {}
+            self.blockStats['yesterday'] = ''
+            self.daily()
 
     def grabAdmins(self, bot):
         """Function to grab and update the current admin list
@@ -175,6 +290,7 @@ class DownBot:
 
                    Returns None
                    """
+        print("saving file " + saveFileName)
         with open(saveFileName, 'w') as fp:
             json.dump(dict, fp)
 
@@ -194,7 +310,18 @@ class DownBot:
                 self.nodes[Web3.toChecksumAddress(val)]['upTime'] = 1
                 self.nodes[Web3.toChecksumAddress(val)]['firstSeen'] = time.time()
                 self.nodes[Web3.toChecksumAddress(val)]['forDelegation'] = 0
-                message = "We have a new validator welcome: " + str(val)
+                self.nodes[Web3.toChecksumAddress(val)]['rollingAvgCount'] = 0
+                self.nodes[Web3.toChecksumAddress(val)]['rollingAvgTotal'] = 0
+                assigned = ''
+                if Web3.toChecksumAddress(val) in self.pendingNodes:
+                    self.nodes[Web3.toChecksumAddress(val)]['ID'] = self.pendingNodes[Web3.toChecksumAddress(val)]['ID']
+                    self.nodes[Web3.toChecksumAddress(val)]['username'] = self.pendingNodes[Web3.toChecksumAddress(val)]['username']
+                    del self.pendingNodes[Web3.toChecksumAddress(val)]
+                    assigned = ' assigned to: ' + str(self.nodes[Web3.toChecksumAddress(val)]['username'])
+                    self.saveSettings(self.pendingNodes, pendingNodeList)
+
+
+                message = "We have a new validator welcome: " + str(val) + assigned
                 self.bot.send_message(self.settings["ChatID"], message)
 
         valToRemove = []
@@ -215,7 +342,7 @@ class DownBot:
 
         for key in self.nodesOld:
             self.nodesOld[key]['numberOfCyclesLastSeen'] += 1
-            if self.nodesOld[key]['numberOfCyclesLastSeen'] == 10:
+            if self.nodesOld[key]['numberOfCyclesLastSeen'] == 30:
                 valToRemove.append(key)
 
         for key in valToRemove:
@@ -272,6 +399,12 @@ class DownBot:
                             self.nodes[node]['username'] = from_user_name
                             #self.nodes[node]['forDelegation'] = 1
                             added += node + '\n'
+                    elif node not in self.pendingNodes:
+                        self.pendingNodes[node] = {}
+                        self.pendingNodes[node]['ID'] = from_user
+                        self.pendingNodes[node]['username'] = from_user_name
+                        added += node + '(pending)\n'
+                        self.saveSettings(self.pendingNodes, pendingNodeList)
                 if(added != ''):
                     self.bot.send_message(chat_id, "@" + str(from_user_name) + " added:\n" + added )
                 self.saveSettings(self.nodes, nodeList)
@@ -398,12 +531,21 @@ class DownBot:
                 stringUser = str(from_user)
                 if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
                     if (message == ''):
-                        self.bot.send_message(chat_id, "format <node,name,website,email>")
+                        self.bot.send_message(chat_id, "format <node,name,website,email,forDelegation>")
                         return
 
                     data = message.split(",")
-                    if len(data) != 4:
-                        self.bot.send_message(chat_id, "format <node,name,website,email>")
+                    if len(data) != 5:
+                        self.bot.send_message(chat_id, "format <node,name,website,email,forDelegation>")
+                        return
+                    
+                    try:
+                        forDel = int(data[4])
+                        if forDel > 1:
+                            self.bot.send_message(chat_id, "for delegation flag must be 0 or 1")
+                            return
+                    except ValueError:
+                        self.bot.send_message(chat_id, "for delegation flag must be 0 or 1")
                         return
 
                     node = Web3.toChecksumAddress(data[0].strip())
@@ -412,9 +554,9 @@ class DownBot:
                         self.nodes[node]['website'] = data[2]
                         self.nodes[node]['email'] = data[3]
 
-                        self.nodes[node]['forDelegation'] = 1
+                        self.nodes[node]['forDelegation'] = forDel
 
-                        self.bot.send_message(chat_id, "Node: " + node + " configured as name = " + data[1] + " website = " + data[2] + " email = " + data[3])
+                        self.bot.send_message(chat_id, "Node: " + node + " configured as name = " + data[1] + " website = " + data[2] + " email = " + data[3] + " for delegation = "+ data[4])
                     else:
                         self.bot.send_message(chat_id, "Node: " + node + " not found!")
                         return
@@ -514,6 +656,24 @@ class DownBot:
                         self.bot.send_message(chat_id, "@" + str(from_user_name) + " removed locked address:\n" + removed )
                     self.saveSettings(self.settings, chatSettingsFile)
                     self.fillSupplies()
+            elif command == '/update_admins':
+                self.grabAdmins(self.bot)
+                self.bot.send_message(chat_id, "Successfully updated admin list")
+            elif command == '/register_status':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    if 'status' not in self.settings:
+                        self.settings['status'] = {}
+                        self.settings['status'][chat_id] = 1
+                        self.bot.send_message(chat_id, "Status messages will now be sent to this chat")
+                    elif chat_id in self.settings['status']:
+                        del self.settings['status'][chat_id]
+                        self.bot.send_message(chat_id, "Status messages will no longer be sent to this chat")
+                    else:
+                        self.settings['status'][chat_id] = 1
+                        self.bot.send_message(chat_id, "Status messages will now be sent to this chat")
+
+                    self.saveSettings(self.settings, chatSettingsFile)
 
     def flagErrors(self, node):
         if self.nodes[node]['missedCount'] >= self.settings["MissedCount"]:
@@ -564,6 +724,52 @@ class DownBot:
         for bal in removeList:
             del self.settings['ActiveBallots'][bal]
 
+    def addStats(self, block):
+        blockTime = datetime.datetime.fromtimestamp(block['timeStamp'])
+        todayStr = str(blockTime.day) + str(blockTime.month) + str(blockTime.year)
+        if todayStr not in self.blockStats['dates']:
+            self.daily()
+
+        hour = str(blockTime.hour)
+        if hour not in self.blockStats['dates'][todayStr]['times']:
+            print(hour + "not in " + todayStr + " not in stats!")
+            return
+        self.blockStats['dates'][todayStr]['times'][hour]['transactions'] += block['numTransactions']
+        self.blockStats['dates'][todayStr]['times'][hour]['gasUsed'] += block['gasUsed']
+
+        if self.blockStats['dates'][todayStr]['times'][hour]['startBlock'] == 0:
+            self.blockStats['dates'][todayStr]['times'][hour]['startBlock'] = block['block']
+            self.saveSettings(self.blockStats, transactionData)
+
+        self.blockStats['dates'][todayStr]['times'][hour]['endBlock'] = block['block']
+        self.blockStats['dates'][todayStr]['totalTransactions'] += block['numTransactions']
+        self.blockStats['dates'][todayStr]['totalGasUsed'] += block['gasUsed']
+
+    def minuiteTask(self):
+        self.checkStatus()
+        self.checkBlockQueue()
+
+    def checkStatus(self):
+        if 'status' in self.settings:
+            timeNow = time.time()
+            #check the rpc
+            reponseRPC = requests.get('https://rpc.fuse.io/api/health')
+            if(reponseRPC.status_code != 200):
+                if(timeNow - self.errors['rpc'] > (1 * 60 * 60)):
+                    messageToSend = "ERROR: fuse RPC is down error code " + str(reponseRPC.status_code)
+                    for chatID in self.settings['status']:
+                        self.bot.send_message(chatID, messageToSend)
+                    self.errors['rpc'] = timeNow
+
+            lastCheck = self.getLastCheck()
+
+            if lastCheck != 0:
+                if (int(timeNow - lastCheck) > 60 * 20):
+                    if (timeNow - self.errors['bot'] > (1 * 60 * 60)):
+                        messageToSend = "ERROR: bot data is stale " + str(reponseRPC.status_code)
+                        for chatID in self.settings['status']:
+                            self.bot.send_message(chatID, messageToSend)
+                        self.errors['bot'] = timeNow
 
 
     def checkBlockQueue(self):
@@ -577,13 +783,16 @@ class DownBot:
                 self.grabValidators()
                 while not self.blockQueue.empty():
                     try:
-                        self.blockQueue.get(False)
+                        blockDetails = self.blockQueue.get(False)
+                        self.addStats(blockDetails)
                     except queue.Empty:
                         continue
                 printLogs("queue empty " + str(self.blockQueue.qsize()))
             else:
+
                 for i in range (0,self.numberOfNodes):
                     blockDetails = self.blockQueue.get()
+                    self.addStats(blockDetails)
                     if blockDetails['miner'] not in lastSet:
                         lastSet[blockDetails['miner']] = {}
                         lastSet[blockDetails['miner']]['count'] = 1
@@ -591,6 +800,17 @@ class DownBot:
                     else:
                         lastSet[blockDetails['miner']]['count'] += 1
                         lastSet[blockDetails['miner']]['lastBlock'] = blockDetails['block']
+                    if(self.oldTimeStamp!=-1):
+                        diff = blockDetails['timeStamp']-self.oldTimeStamp
+                        if len(self.timeStampDeque) >= 5000:
+                            valueRemoved = self.timeStampDeque[0]
+                            self.rollingBlockTime -= valueRemoved
+
+                        self.rollingBlockTime+=diff
+                        self.timeStampDeque.append(diff)
+                        self.avgBlockTime = self.rollingBlockTime/len(self.timeStampDeque)
+
+                    self.oldTimeStamp=blockDetails['timeStamp']
 
                 self.displayBallot(blockDetails['block'])
 
@@ -599,11 +819,13 @@ class DownBot:
                     self.collectedSigData = grabDataFromGraphQL()
                     if( int(self.collectedSigData[0]['blockNumber']) > (int(self.currentEndOfCycle)) and int(self.collectedSigData[1]['blockNumber']) > (int(self.currentEndOfCycle))):
                         #if we are 100 blocks passed the last end of cycle then grab the new end of cycle block
+                        test = 1
                         self.currentEndOfCycle = getEndOfCycleBlock()
                         #create a thread which will wait 2hours before checking that the blocks have been relayed
-                        Thread(target=self.checkEndOfCycle).start()
+                        #Thread(target=self.checkEndOfCycle).start()
                     else:
-                        self.bot.send_message(self.settings["ChatID"],"ERROR: Failed to relay end of cycle on fuse net within 300 blocks!")
+                        test = 1
+                        #self.bot.send_message(self.settings["ChatID"],"ERROR: Failed to relay end of cycle on fuse net within 300 blocks!")
 
                     self.incOldNodes()
                     #check to see if a vote is open
@@ -616,13 +838,20 @@ class DownBot:
                         printLogs(str(node) + "missed last block mined = " + str(self.nodes[node]['lastBlock']))
                         self.nodes[node]['missedCount'] += 1
                         self.nodes[node]['totalMissed'] += 1
+                        if(self.nodes[node]['rollingAvgCount'] != 0):
+                            self.nodes[node]['rollingAvgCount'] -= 1
                         self.flagErrors(node)
                     else:
                         self.nodes[node]['lastBlock'] = lastSet[node]['lastBlock']
                         self.nodes[node]['missedCount'] = 0
                         self.nodes[node]['totalValidated'] += 1
+                        if (self.nodes[node]['rollingAvgCount'] != ROLLING_AVG_MAX):
+                            self.nodes[node]['rollingAvgCount'] += 1
 
-                    self.nodes[node]['upTime'] = (self.nodes[node]['totalValidated']/(self.nodes[node]['totalValidated'] + self.nodes[node]['totalMissed'])*100)
+                    if (self.nodes[node]['rollingAvgTotal'] != ROLLING_AVG_MAX):
+                        self.nodes[node]['rollingAvgTotal'] += 1
+
+                    self.nodes[node]['upTime'] = (self.nodes[node]['rollingAvgCount']/(self.nodes[node]['rollingAvgTotal'])*100)
             self.saveSettings(self.nodes, nodeList)
             self.saveSettings(self.settings, chatSettingsFile)
 
@@ -664,22 +893,24 @@ class DownBot:
                 self.saveSettings(self.nodes, nodeList)
 
     def checkBalance(self):
+        self.saveSettings(self.blockStats, transactionData)
         test = 1
-        # for node in self.nodes:
-        #     balance = getBalance(node)
-        #     message = ''
-        #     if balance['eth'] <= self.settings["EthWarning"]:
-        #         message += 'Eth balance low (' + str(balance['eth']) + ')\n'
-        #     if balance['fuse'] <= self.settings['FuseWarning']:
-        #         message += 'Fuse balance low (' + str(balance['fuse']) + ')\n'
-        #
-        #     if message != '':
-        #         user = ''
-        #         if 'username' in self.nodes[node]:
-        #             user = '@' + self.nodes[node]['username']
-        #
-        #         message = user + ' ' + str(node) + '\n' + message
-        #         self.bot.send_message(self.settings["ChatID"], message)
+        for node in self.nodes:
+            if(str(node) == '0xd9176e84898a0054680aEc3f7C056b200c3d96C3'):
+                balance = getBalance(node)
+                message = ''
+                if balance['eth'] <= self.settings["EthWarning"]:
+                    message += 'Eth balance low (' + str(balance['eth']) + ')\n'
+                if balance['fuse'] <= self.settings['FuseWarning']:
+                    message += 'Fuse balance low (' + str(balance['fuse']) + ')\n'
+
+                if message != '':
+                    user = ''
+                    if 'username' in self.nodes[node]:
+                        user = '@' + self.nodes[node]['username']
+        
+                    message = user + ' ' + str(node) + '\n' + message
+                    self.bot.send_message(self.settings["ChatID"], message)
 
     def getNodes(self):
         return self.nodes
@@ -695,6 +926,43 @@ class DownBot:
 
     def getCirc(self):
         return self.stats['circSupply']
+
+    def isAssigned(self, nodeId):
+        retFlag = False
+        nodeIDCheckSum = Web3.toChecksumAddress(nodeId)
+
+        if nodeIDCheckSum in self.nodes:
+            if ('ID' in self.nodes[nodeIDCheckSum]) or ('username' in self.nodes[nodeIDCheckSum]):
+                retFlag = True
+        elif nodeIDCheckSum in self.pendingNodes:
+            retFlag = True
+
+        return retFlag
+
+    def getStats(self,dayString):
+        if dayString not in self.blockStats['dates']:
+            return None
+        else:
+            return self.blockStats['dates'][dayString]
+
+    def getStatsHour(self,dayString,hour):
+        if dayString not in self.blockStats['dates']:
+            return None
+        elif hour not in self.blockStats['dates'][dayString]['times']:
+            return None 
+        return self.blockStats['dates'][dayString]['times'][hour]
+    
+    def getValidatorList(self):
+        return getValidators()
+
+    def getBlockTime(self):
+        return self.avgBlockTime
+
+    def getAPY(self):
+        return self.APY
+
+    def getNumberOfDelegates(self):
+        return self.numberOfDelegates
 
     def start(self):
         updater = Updater(token=self.settings["BOTKey"], use_context=True)
@@ -713,8 +981,9 @@ class DownBot:
             Filters.photo, lambda bot, update: self.image_handler(bot, update)
         ))
 
-        schedule.every(1).minutes.do(self.checkBlockQueue)
+        schedule.every(1).minutes.do(self.minuiteTask)
         schedule.every().day.at("12:00").do(self.checkBalance)
+        schedule.every().day.at("00:01").do(self.daily)
 
         updater.start_polling()
 
@@ -736,7 +1005,21 @@ def resource_not_found(e):
 def error(e):
     return jsonify(error=str(e)), 500
 
-@app.route('/bot/api/v1/health', methods=['GET'])
+@app.route('/api/v1/APY', methods=['GET'])
+@cross_origin()
+def APY():
+    apypercent = downBot.getAPY()
+
+    return jsonify(apypercent)
+
+@app.route('/api/v1/numberOfDelegates', methods=['GET'])
+@cross_origin()
+def number_Of_delegates():
+    delegates = downBot.getNumberOfDelegates()
+
+    return jsonify(delegates)
+
+@app.route('/api/v1/health', methods=['GET'])
 @cross_origin()
 def bot_health():
     timeNow = time.time()
@@ -751,7 +1034,7 @@ def bot_health():
 
     return jsonify({'health ': healthStr})
 
-@app.route('/bot/api/v1/stats/supply', methods=['GET'])
+@app.route('/api/v1/stats/supply', methods=['GET'])
 @cross_origin()
 def get_total_supply():
     supply = downBot.getTotal()
@@ -759,14 +1042,37 @@ def get_total_supply():
     return jsonify(block=supply['block'],
                    total_supply=supply['supply'])
 
-@app.route('/bot/api/v1/stats/circulating', methods=['GET'])
+@app.route('/api/v1/stats/total_supply_simple', methods=['GET'])
+@cross_origin()
+def get_total_supply_simple():
+    supply = downBot.getTotal()
+
+    return jsonify(supply['supply'])
+
+
+@app.route('/api/v1/stats/circulating', methods=['GET'])
 @cross_origin()
 def get_circulating_supply():
     circ = downBot.getCirc()
 
     return jsonify(circ)
 
-@app.route('/bot/api/v1/getNodeLogo=<node_id>', methods=['GET'])
+
+@app.route('/api/v1/stats/circulating_simple', methods=['GET'])
+@cross_origin()
+def get_circulating_supply_simple():
+    circ = downBot.getCirc()
+
+    return jsonify(circ["total"])
+
+@app.route('/api/v1/valList', methods=['GET'])
+@cross_origin()
+def get_valList():
+    vals = downBot.getValidatorList()
+
+    return jsonify(vals)
+
+@app.route('/api/v1/getNodeLogo=<node_id>', methods=['GET'])
 @cross_origin()
 def get_Logo(node_id):
     nodes = downBot.getNodes()
@@ -784,8 +1090,49 @@ def get_Logo(node_id):
 
     return send_file(node['photo'], mimetype='image/gif')
 
+@app.route('/api/v1/stats/dailyTransactionStats_day=<day>_month=<month>_year=<year>', methods=['GET'])
+@cross_origin()
+def get_stats(day,month,year):
+    dayStr = day+month+year
+    stats = downBot.getStats(dayStr)
 
-@app.route('/bot/api/v1/node=<node_id>', methods=['GET'])
+    if stats is None:
+        abort(404, description="No stats for " + dayStr)
+
+    return jsonify(stats)
+
+@app.route('/api/v1/stats/dailyTransactionStats_day=<day>_month=<month>_year=<year>_hour=<hour>', methods=['GET'])
+@cross_origin()
+def get_stats_hour(day,month,year,hour):
+    dayStr = day+month+year
+    stats = downBot.getStatsHour(dayStr,hour)
+
+    if stats is None:
+        abort(404, description="No stats for " + dayStr + " at hour " + hour)
+
+    return jsonify(stats)
+
+@app.route('/api/v1/stats/getTransactionGraph_day=<day>_month=<month>_year=<year>', methods=['GET'])
+@cross_origin()
+def get_transaction_graph(day,month,year):
+    dayStr = day+month+year
+    pltString = "plots/transactions" + dayStr + '.png'
+    if (not os.path.isfile(pltString)):
+        abort(404, description="No graph for " + dayStr)
+
+    return send_file(pltString, mimetype='image/gif')
+
+@app.route('/api/v1/stats/getGasUsageGraph_day=<day>_month=<month>_year=<year>', methods=['GET'])
+@cross_origin()
+def get_gas_graph(day,month,year):
+    dayStr = day+month+year
+    pltString = "plots/gasUsed" + dayStr + '.png'
+    if (not os.path.isfile(pltString)):
+        abort(404, description="No graph for " + dayStr)
+
+    return send_file(pltString, mimetype='image/gif')
+
+@app.route('/api/v1/node=<node_id>', methods=['GET'])
 @cross_origin()
 def get_task(node_id):
     nodes = downBot.getNodes()
@@ -798,19 +1145,31 @@ def get_task(node_id):
     return jsonify({'Node': node})
 
 
-@app.route('/bot/api/v1/nodes', methods=['GET'])
+@app.route('/api/v1/checkSumAddr=<node_id>', methods=['GET'])
+@cross_origin()
+def get_checksumAddr(node_id):
+    checksum = Web3.toChecksumAddress(node_id)
+    return jsonify({'checksum': checksum})
+
+@app.route('/api/v1/isNodeAssigned=<node_id>', methods=['GET'])
+@cross_origin()
+def isNodeAssigned(node_id):
+    assigned = downBot.isAssigned(node_id)
+    return jsonify({'Assigned': assigned})
+
+@app.route('/api/v1/nodes', methods=['GET'])
 @cross_origin()
 def all_nodes():
     nodes = downBot.getNodes()
     return jsonify(nodes)
 
-@app.route('/bot/api/v1/oldNodes', methods=['GET'])
+@app.route('/api/v1/oldNodes', methods=['GET'])
 @cross_origin()
 def old_nodes():
     oldNodes = downBot.getOldNodes()
     return jsonify(oldNodes)
 
-@app.route('/bot/api/v1/delegatedNodes', methods=['GET'])
+@app.route('/api/v1/delegatedNodes', methods=['GET'])
 @cross_origin()
 def all_nodes_delegated():
     nodes = downBot.getNodes()
@@ -824,7 +1183,7 @@ def all_nodes_delegated():
     return jsonify(delegated)
 
 
-@app.route('/bot/api/v1/delegatedNodes_sorted', methods=['GET'])
+@app.route('/api/v1/delegatedNodes_sorted', methods=['GET'])
 @cross_origin()
 def all_nodes_delegated_sorted():
     nodes = downBot.getNodes()
@@ -840,7 +1199,7 @@ def all_nodes_delegated_sorted():
     return jsonify(delegated)
 
 
-@app.route('/bot/api/v1/offline', methods=['GET'])
+@app.route('/api/v1/offline', methods=['GET'])
 @cross_origin()
 def offline():
     nodes = downBot.getNodes()
@@ -856,6 +1215,12 @@ def offline():
         offlineNodes = 'No nodes offline'
 
     return jsonify({'Offline Nodes ': offlineNodes})
+
+@app.route('/api/v1/blockTime', methods=['GET'])
+@cross_origin()
+def blockTime():
+    blockTime = downBot.getBlockTime()
+    return jsonify(blockTime)
 
 def has_no_empty_params(rule):
     defaults = rule.defaults if rule.defaults is not None else ()
