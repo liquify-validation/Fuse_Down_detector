@@ -12,6 +12,7 @@ import votingABI
 import collections
 import errno
 from socket import error as socket_error
+import time
 
 HOURS_TO_SEARCH_BACK = 3
 
@@ -39,6 +40,25 @@ def getBalance(node):
     balance['fuse'] = fuseBalance
 
     return balance
+
+def getValStats():
+    DECIMAL = 10 ** 18
+    vals = getValidators()
+
+    returnDict = {}
+
+    web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
+    fuseConsensusContract = web3Fuse.eth.contract(abi=contractABI.CONSENSUS_ABI, address=contractABI.CONSENSUS_ADDRESS)
+    totalStaked = fuseConsensusContract.functions.totalStakeAmount().call() / DECIMAL
+
+    for val in vals:
+        returnDict[Web3.toChecksumAddress(val)] = {}
+        returnDict[Web3.toChecksumAddress(val)]['deleagtes'] = fuseConsensusContract.functions.delegatorsLength(val).call()
+        returnDict[Web3.toChecksumAddress(val)]['totalStaked'] = fuseConsensusContract.functions.stakeAmount(val).call() / DECIMAL
+        returnDict[Web3.toChecksumAddress(val)]['valFee'] = (fuseConsensusContract.functions.validatorFee(val).call() / DECIMAL) * 100
+        returnDict[Web3.toChecksumAddress(val)]['ratioOfStake'] = (returnDict[Web3.toChecksumAddress(val)]['totalStaked'] / totalStaked) * 100
+
+    return returnDict
 
 def checkAddressIsValid(address):
     checkSumAddr = Web3.toChecksumAddress(address)
@@ -69,7 +89,7 @@ def getTotalSupply(block):
 def getCircSupply(totalSupply, block, lockedAccountsList):
     circSupplyFuse = totalSupply
 
-    RPC_ADDRESS = 'https://rpc.fuse.io'
+    RPC_ADDRESS = contractABI.RPC_ADDRESS
     DECIMAL = 10 ** 18
     web3Eth = Web3(Web3.HTTPProvider("https://mainnet.infura.io/v3/"))
     web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
@@ -109,6 +129,7 @@ def getCircSupply(totalSupply, block, lockedAccountsList):
     returnDict['onFuseNetwork'] = circSupplyFuse
     returnDict['onEtherumNetwork'] = circSupplyMain
     returnDict['staked'] = stakedAmount
+    returnDict['ratioStaked'] = (stakedAmount/returnDict['total']) * 100
 
     return returnDict
 
@@ -142,7 +163,7 @@ def log_loop(web3Fuse, poll_interval,blockQueue):
                 blockQueue.put(blockDetails)
                 oldBlockNumber = newBlock
             time.sleep(poll_interval)
-        except socket_error as serr:
+        except (socket_error, KeyError) as serr:
             print("Caught connection exception")
             time.sleep(0.5)
 

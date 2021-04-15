@@ -22,13 +22,14 @@ import matplotlib.pyplot as plt
 import logging
 import requests
 import collections
+import shelve
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 debug = True
 defaultKey = ''
-defaultID = ''
+defaultID = '-'
 defaultMissed = 3
 defaultTimeOut = 6
 defaultFuse = 0.5
@@ -41,12 +42,13 @@ nodeList = "nodes.json"
 pendingNodeList = "pendingNodes.json"
 nodeListOld = "nodes_old.json"
 transactionData = 'transactions.json'
+valBlockList = "blockData.pickle"
 
 def printLogs(message):
     if debug:
         print(message)
 
-command_list = ['update_admins','info','set_eth_warning','set_fuse_warning','add_node','remove_node','set_dead_time','add_name','add_website','add_contact','override_info','set_delegation','set_photo','remove_delegation','set_photo_override','add_locked_account','remove_locked_account','get_locked_account', 'update_admins', 'register_status']
+command_list = ['update_admins','info','set_eth_warning','set_fuse_warning','add_node','remove_node','set_dead_time','add_name','add_website','add_contact','override_info','set_delegation','set_photo','remove_delegation','set_photo_override','add_locked_account','remove_locked_account','get_locked_account', 'update_admins', 'register_status','get_endpoints','add_endpoint','remove_endpoint' ]
 __location__ = os.path.realpath(
     os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
@@ -60,7 +62,7 @@ Leon = ""
 Andy = ""
 Mark = ""
 
-ROLLING_AVG_MAX = 20000
+ROLLING_AVG_MAX = 15000
 
 class DownBot:
     def __init__(self):
@@ -72,7 +74,6 @@ class DownBot:
         self.parseNodes()
         self.parseOldNodes()
         self.parseStats()
-        #self.settings["lockedAccounts"] = []
     
         self.lastCheck = time.time()
 
@@ -108,12 +109,17 @@ class DownBot:
         self.stats['circSupply'] = {}
 
         self.errors = {}
-        self.errors['rpc'] = 0
+        self.errors['rpc'] = {}
+        self.errors['rpc']['https://rpc.fuse.io'] = 0
+        self.errors['rpc']['https://internalrpc.fuse.io'] = 0
+        self.errors['rpc']['https://internalfullrpc.fuse.io'] = 0
+
         self.errors['bot'] = 0
+        self.errors['comp'] = 0
 
         self.numberOfDelegates = 0
         self.APY = 0
-        
+
         self.fillSupplies()
         self.daily()
 
@@ -157,6 +163,9 @@ class DownBot:
             self.blockStats['yesterday'] = todayStr
 
             self.saveSettings(self.blockStats, transactionData)
+
+        self.blockList.close()
+        self.blockList = shelve.open(valBlockList, writeback=True)
 
     def generatePlots(self):
         plots = ['transactions','gasUsed']
@@ -239,9 +248,16 @@ class DownBot:
                     self.nodes[node]['rollingAvgCount'] = 0
                 if 'rollingAvgTotal' not in self.nodes[node]:
                     self.nodes[node]['rollingAvgTotal'] = 0
+
             self.saveSettings(self.nodes, nodeList)
         else:
             self.nodes = {}
+
+        self.blockList = shelve.open(valBlockList,writeback=True)
+        
+        for node in self.nodes:
+            if node not in self.blockList:
+                self.blockList[node] = collections.deque(maxlen=ROLLING_AVG_MAX)
 
         if os.path.exists(os.path.join(__location__, pendingNodeList)):
             printLogs("loading Nodes")
@@ -312,6 +328,7 @@ class DownBot:
                 self.nodes[Web3.toChecksumAddress(val)]['forDelegation'] = 0
                 self.nodes[Web3.toChecksumAddress(val)]['rollingAvgCount'] = 0
                 self.nodes[Web3.toChecksumAddress(val)]['rollingAvgTotal'] = 0
+                self.blockList[Web3.toChecksumAddress(val)] = collections.deque(maxlen=ROLLING_AVG_MAX)
                 assigned = ''
                 if Web3.toChecksumAddress(val) in self.pendingNodes:
                     self.nodes[Web3.toChecksumAddress(val)]['ID'] = self.pendingNodes[Web3.toChecksumAddress(val)]['ID']
@@ -336,6 +353,14 @@ class DownBot:
                 self.nodesOld[key]['numberOfCyclesLastSeen'] = 0
             del self.nodes[key]
             print("removed " + key)
+
+        valStats = getValStats()
+
+        for valSata in valStats:
+            self.nodes[valSata]['deleagtes'] = valStats[valSata]['deleagtes']
+            self.nodes[valSata]['totalStaked'] = valStats[valSata]['totalStaked']
+            self.nodes[valSata]['valFee'] = valStats[valSata]['valFee']
+            self.nodes[valSata]['ratioOfStake'] = valStats[valSata]['ratioOfStake']
 
     def incOldNodes(self):
         valToRemove = []
@@ -674,6 +699,47 @@ class DownBot:
                         self.bot.send_message(chat_id, "Status messages will now be sent to this chat")
 
                     self.saveSettings(self.settings, chatSettingsFile)
+            elif command == '/get_endpoints':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    rpcString = ''
+                    for account in self.errors["rpc"]:
+                        rpcString += "• " + account + "\n"
+                        rpcString += "\n"
+                    if (rpcString == ''):
+                        rpcString = "no endpoints"
+                    self.bot.send_message(chat_id, rpcString)
+            elif command == '/add_endpoint':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    if (message == ''):
+                        self.bot.send_message(chat_id, "Cannot add endpoint(s) No endpoints given")
+                        return
+
+                    listOfEndPoints = message.split(",")
+                    added = ''
+                    for addr in listOfEndPoints:
+                        if addr not in self.errors["rpc"]:
+                            self.errors["rpc"][addr] = 0
+                            added += addr + '\n'
+                    if(added != ''):
+                        self.bot.send_message(chat_id, "@" + str(from_user_name) + " added new locked address:\n" + added )
+            elif command == '/remove_endpoint':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    if (message == ''):
+                        self.bot.send_message(chat_id, "Cannot remove endpoint(s) No endpoints given")
+                        return
+
+                    listOfEndPoints = message.split(",")
+                    removed = ''
+                    for addr in listOfEndPoints:
+                        if addr in self.errors["rpc"]:
+                            del self.errors["rpc"][addr]
+                            removed += addr + '\n'
+                    if(removed != ''):
+                        self.bot.send_message(chat_id, "@" + str(from_user_name) + " removed endpoints:\n" + removed )
+
 
     def flagErrors(self, node):
         if self.nodes[node]['missedCount'] >= self.settings["MissedCount"]:
@@ -749,17 +815,44 @@ class DownBot:
         self.checkStatus()
         self.checkBlockQueue()
 
+    def hourTask(self):
+        self.grabValidators()
+
     def checkStatus(self):
         if 'status' in self.settings:
             timeNow = time.time()
             #check the rpc
-            reponseRPC = requests.get('https://rpc.fuse.io/api/health')
-            if(reponseRPC.status_code != 200):
-                if(timeNow - self.errors['rpc'] > (1 * 60 * 60)):
-                    messageToSend = "ERROR: fuse RPC is down error code " + str(reponseRPC.status_code)
-                    for chatID in self.settings['status']:
-                        self.bot.send_message(chatID, messageToSend)
-                    self.errors['rpc'] = timeNow
+            blockList = []
+            blocksString = ''
+            for key in self.errors['rpc']:
+                headers = {
+                    'Content-Type': 'application/json',
+                }           
+
+                data = '{"jsonrpc":"2.0","method":"eth_blockNumber","params": [],"id":1}'
+                reponseRPC = requests.post(key, headers=headers, data=data)
+                
+                jsonResp = reponseRPC.json()
+                block = int(jsonResp['result'],0)
+                blockList.append(block)
+                blocksString += key + " at block: " + str(block) + '\n'
+            
+                if(reponseRPC.status_code != 200):
+                    if(timeNow - self.errors['rpc'][key] > (1 * 60 * 60)):
+                        messageToSend = "ERROR: " + key + " is down error code " + str(reponseRPC.status_code)
+                        for chatID in self.settings['status']:
+                            self.bot.send_message(chatID, messageToSend)
+                        self.errors['rpc'][key] = timeNow
+
+            if len(blockList) > 1:
+                diff = max(blockList) - min(blockList)
+                if(timeNow - self.errors['comp'] > (1 * 60 * 60)):
+                    if (diff > 10):
+                        messageToSend = "Node stuck!\n" + blocksString
+                        for chatID in self.settings['status']:
+                            self.bot.send_message(chatID, messageToSend)
+                        self.errors['comp'] = timeNow
+
 
             lastCheck = self.getLastCheck()
 
@@ -809,6 +902,7 @@ class DownBot:
                         self.rollingBlockTime+=diff
                         self.timeStampDeque.append(diff)
                         self.avgBlockTime = self.rollingBlockTime/len(self.timeStampDeque)
+                        #print(str(diff) + " rolling " + str(self.rollingBlockTime))
 
                     self.oldTimeStamp=blockDetails['timeStamp']
 
@@ -838,20 +932,17 @@ class DownBot:
                         printLogs(str(node) + "missed last block mined = " + str(self.nodes[node]['lastBlock']))
                         self.nodes[node]['missedCount'] += 1
                         self.nodes[node]['totalMissed'] += 1
-                        if(self.nodes[node]['rollingAvgCount'] != 0):
-                            self.nodes[node]['rollingAvgCount'] -= 1
+                        self.blockList[node].append(0)
                         self.flagErrors(node)
                     else:
                         self.nodes[node]['lastBlock'] = lastSet[node]['lastBlock']
                         self.nodes[node]['missedCount'] = 0
                         self.nodes[node]['totalValidated'] += 1
-                        if (self.nodes[node]['rollingAvgCount'] != ROLLING_AVG_MAX):
-                            self.nodes[node]['rollingAvgCount'] += 1
+                        self.blockList[node].append(1)
 
-                    if (self.nodes[node]['rollingAvgTotal'] != ROLLING_AVG_MAX):
-                        self.nodes[node]['rollingAvgTotal'] += 1
-
-                    self.nodes[node]['upTime'] = (self.nodes[node]['rollingAvgCount']/(self.nodes[node]['rollingAvgTotal'])*100)
+                    self.nodes[node]['rollingAvgCount'] = self.blockList[node].count(1)
+                    self.nodes[node]['rollingAvgTotal'] = len(self.blockList[node])
+                    self.nodes[node]['upTime'] = ((self.blockList[node].count(1))/(len(self.blockList[node]))) * 100
             self.saveSettings(self.nodes, nodeList)
             self.saveSettings(self.settings, chatSettingsFile)
 
@@ -910,6 +1001,19 @@ class DownBot:
                         user = '@' + self.nodes[node]['username']
         
                     message = user + ' ' + str(node) + '\n' + message
+                    self.bot.send_message(self.settings["ChatID"], message)
+
+                balance = getBalance('0xb093ba323d42bd1854235c81979DC27B2dA43887')
+                message = ''
+                if balance['eth'] <= self.settings["EthWarning"]:
+                    message += 'Eth balance low (' + str(balance['eth']) + ')\n'
+
+                if message != '':
+                    user = ''
+                    if 'username' in self.nodes[node]:
+                        user = '@' + self.nodes[node]['username']
+
+                    message = user + ' ' + str('0xb093ba323d42bd1854235c81979DC27B2dA43887') + '\n' + message
                     self.bot.send_message(self.settings["ChatID"], message)
 
     def getNodes(self):
@@ -982,10 +1086,14 @@ class DownBot:
         ))
 
         schedule.every(1).minutes.do(self.minuiteTask)
+        schedule.every(1).hour.do(self.hourTask)
         schedule.every().day.at("12:00").do(self.checkBalance)
         schedule.every().day.at("00:01").do(self.daily)
 
         updater.start_polling()
+
+        # worker = Thread(target=self.flaskThread)
+        # worker.start()
 
         while (1):
             schedule.run_pending()
