@@ -23,13 +23,14 @@ import logging
 import requests
 import collections
 import shelve
+import private
 
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
 debug = True
-defaultKey = ''
-defaultID = '-'
+defaultKey = private.BOT_KEY
+defaultID = private.DEFAULT_CHANNEL
 defaultMissed = 3
 defaultTimeOut = 6
 defaultFuse = 0.5
@@ -48,7 +49,7 @@ def printLogs(message):
     if debug:
         print(message)
 
-command_list = ['update_admins','info','set_eth_warning','set_fuse_warning','add_node','remove_node','set_dead_time','add_name','add_website','add_contact','override_info','set_delegation','set_photo','remove_delegation','set_photo_override','add_locked_account','remove_locked_account','get_locked_account', 'update_admins', 'register_status','get_endpoints','add_endpoint','remove_endpoint' ]
+command_list = ['update_admins','info','set_eth_warning','set_fuse_warning','add_node','remove_node','set_dead_time','add_name','add_website','add_contact','override_info','set_delegation','set_photo','remove_delegation','set_photo_override','add_locked_account','remove_locked_account','get_locked_account', 'update_admins', 'register_status','get_endpoints','add_endpoint','remove_endpoint','add_locked_volt','remove_locked_volt','get_locked_volt']
 __location__ = os.path.realpath(
     os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
@@ -58,11 +59,11 @@ app.config['CORS_HEADERS'] = 'Content-Type'
 
 yesterday = ''
 
-Leon = ""
-Andy = ""
-Mark = ""
+Leon = private.LEON_ID
+Andy = private.ANDY_ID
+Mark = private.MARK_ID
 
-ROLLING_AVG_MAX = 15000
+ROLLING_AVG_MAX = 4000
 
 class DownBot:
     def __init__(self):
@@ -74,6 +75,7 @@ class DownBot:
         self.parseNodes()
         self.parseOldNodes()
         self.parseStats()
+        #self.settings["lockedAccounts"] = []
     
         self.lastCheck = time.time()
 
@@ -89,7 +91,7 @@ class DownBot:
 
         self.currentEndOfCycle = getEndOfCycleBlock()
 
-        self.checkBalance()
+        #self.checkBalance()
 
         createBlockThread(self.blockQueue)
 
@@ -107,13 +109,18 @@ class DownBot:
         self.stats['totalSupply']['supply'] = 0
 
         self.stats['circSupply'] = {}
+        self.stats['circSupplyV2'] = {}
+        self.stats['circSupplyVolt'] = {}
+
+        self.stats['wallets'] = {}
 
         self.errors = {}
         self.errors['rpc'] = {}
         self.errors['rpc']['https://rpc.fuse.io'] = 0
         self.errors['rpc']['https://internalrpc.fuse.io'] = 0
         self.errors['rpc']['https://internalfullrpc.fuse.io'] = 0
-
+        self.errors['rpc']['https://oefusefull1.liquify.info'] = 0
+   
         self.errors['bot'] = 0
         self.errors['comp'] = 0
 
@@ -164,6 +171,7 @@ class DownBot:
 
             self.saveSettings(self.blockStats, transactionData)
 
+        self.updateWallets()
         self.blockList.close()
         self.blockList = shelve.open(valBlockList, writeback=True)
 
@@ -196,8 +204,20 @@ class DownBot:
         circ = getCircSupply(self.stats['totalSupply']['supply'], block, self.settings["lockedAccounts"])
         self.stats['circSupply'] = copy.deepcopy(circ)
 
+        circ = getCircSupplyV2(self.stats['totalSupply']['supply'], block, self.settings["lockedAccounts"])
+        self.stats['circSupplyV2'] = copy.deepcopy(circ)
+        
+        circ = getCircSupplyVolt(block,self.settings["lockedVoltage"])
+        self.stats['circSupplyVolt'] = copy.deepcopy(circ)
+
+
         self.numberOfDelegates = getTotalDelegates()
         self.APY = ((43150)/self.stats['circSupply']['staked']) * 100 * 365 * 0.85
+
+    def updateWallets(self):
+        print("up")
+        #wallets = grabWallets()
+        #self.stats['wallets'] = copy.deepcopy(wallets)
 
     def fillActiveBallots(self, ballots):
         if ballots == None:
@@ -235,6 +255,9 @@ class DownBot:
             self.settings["FuseWarning"] = defaultFuse
             self.settings["EthWarning"] = defaultEth
             self.settings["lockedAccounts"] = []
+
+        if "lockedVoltage" not in self.settings:
+            self.settings["lockedVoltage"] = []
 
     def parseNodes(self):
         if os.path.exists(os.path.join(__location__, nodeList)):
@@ -739,6 +762,55 @@ class DownBot:
                             removed += addr + '\n'
                     if(removed != ''):
                         self.bot.send_message(chat_id, "@" + str(from_user_name) + " removed endpoints:\n" + removed )
+            elif command == '/add_locked_volt':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    if (message == ''):
+                        self.bot.send_message(chat_id, "Cannot add locked account(s) No accounts given")
+                        return
+
+                    listOfAddrs = message.split(",")
+                    added = ''
+                    for addr in listOfAddrs:
+                        if (checkAddressIsValid(addr) == False):
+                            self.bot.send_message(chat_id, "Sorry " + addr + " is not a valid address")
+                            time.sleep(0.1)
+                        else:
+                            addr = Web3.toChecksumAddress(addr.strip())
+                            if addr not in self.settings["lockedVoltage"]:
+                                self.settings["lockedVoltage"].append(addr)
+                                added += addr + '\n'
+                    if(added != ''):
+                        self.bot.send_message(chat_id, "@" + str(from_user_name) + " added new locked address:\n" + added )
+                    self.saveSettings(self.settings, chatSettingsFile)
+                    self.fillSupplies()
+            elif command == '/get_locked_volt':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    lockedString = ''
+                    for account in self.settings["lockedVoltage"]:
+                        lockedString += "• " + account + "\n"
+                        lockedString += "\n"
+                    if (lockedString == ''):
+                        lockedString = "no locked account"
+                    self.bot.send_message(chat_id, lockedString)
+            elif command == '/remove_locked_volt':
+                stringUser = str(from_user)
+                if (stringUser == Andy or stringUser == Mark or stringUser == Leon):
+                    if (message == ''):
+                        self.bot.send_message(chat_id, "Cannot add locked account(s) No accounts given")
+                        return
+
+                    listOfAddrs = message.split(",")
+                    removed = ''
+                    for addr in listOfAddrs:
+                        if addr in self.settings["lockedVoltage"]:
+                            self.settings["lockedVoltage"].remove(addr)
+                            removed += addr + '\n'
+                    if(removed != ''):
+                        self.bot.send_message(chat_id, "@" + str(from_user_name) + " removed locked address:\n" + removed )
+                    self.saveSettings(self.settings, chatSettingsFile)
+                    self.fillSupplies()
 
 
     def flagErrors(self, node):
@@ -812,8 +884,15 @@ class DownBot:
         self.blockStats['dates'][todayStr]['totalGasUsed'] += block['gasUsed']
 
     def minuiteTask(self):
-        self.checkStatus()
-        self.checkBlockQueue()
+        try:
+            self.checkStatus()
+        except Exception as e:
+            print("error Status" + str(e))
+        
+        try:
+            self.checkBlockQueue()
+        except Exception as e:
+            print("error Queue" + str(e))
 
     def hourTask(self):
         self.grabValidators()
@@ -826,32 +905,49 @@ class DownBot:
             blocksString = ''
             for key in self.errors['rpc']:
                 headers = {
-                    'Content-Type': 'application/json',
+                        'Content-Type': 'application/json',
                 }           
 
                 data = '{"jsonrpc":"2.0","method":"eth_blockNumber","params": [],"id":1}'
-                reponseRPC = requests.post(key, headers=headers, data=data)
+                try:
+                    reponseRPC = requests.post(key, headers=headers, data=data)
                 
-                jsonResp = reponseRPC.json()
-                block = int(jsonResp['result'],0)
-                blockList.append(block)
-                blocksString += key + " at block: " + str(block) + '\n'
-            
-                if(reponseRPC.status_code != 200):
+                    try:
+                        jsonResp = reponseRPC.json()
+                        if(reponseRPC.status_code != 200):
+                            if(timeNow - self.errors['rpc'][key] > (1 * 60 * 60)):
+                                messageToSend = "ERROR: " + key + " is down error code " + str(reponseRPC.status_code)
+                                for chatID in self.settings['status']:
+                                    self.bot.send_message(chatID, messageToSend)
+                                self.errors['rpc'][key] = timeNow
+                        else:
+                            block = int(jsonResp['result'],0)
+                            blockList.append(block)
+                            blocksString += key + " at block: " + str(block) + '\n'
+                    except:
+                        if(timeNow - self.errors['rpc'][key] > (1 * 60 * 60)):
+                            messageToSend = "ERROR: " + key + " failed to grab block number"
+                            for chatID in self.settings['status']:
+                                self.bot.send_message(chatID, messageToSend)
+                            self.errors['rpc'][key] = timeNow
+                        pass
+                except Exception as e:
                     if(timeNow - self.errors['rpc'][key] > (1 * 60 * 60)):
-                        messageToSend = "ERROR: " + key + " is down error code " + str(reponseRPC.status_code)
+                        messageToSend = "ERROR: " + key + " is down unknown error\n" + e 
                         for chatID in self.settings['status']:
                             self.bot.send_message(chatID, messageToSend)
                         self.errors['rpc'][key] = timeNow
+                    pass
 
             if len(blockList) > 1:
                 diff = max(blockList) - min(blockList)
                 if(timeNow - self.errors['comp'] > (1 * 60 * 60)):
-                    if (diff > 10):
+                    if (diff > 50):
                         messageToSend = "Node stuck!\n" + blocksString
                         for chatID in self.settings['status']:
                             self.bot.send_message(chatID, messageToSend)
                         self.errors['comp'] = timeNow
+                #print(blocksString)
 
 
             lastCheck = self.getLastCheck()
@@ -907,20 +1003,14 @@ class DownBot:
                     self.oldTimeStamp=blockDetails['timeStamp']
 
                 self.displayBallot(blockDetails['block'])
-
+                printLogs("done ballot")
                 if int(blockDetails['block']) > (int(self.currentEndOfCycle) + 300):
                     self.fillSupplies()
-                    self.collectedSigData = grabDataFromGraphQL()
-                    if( int(self.collectedSigData[0]['blockNumber']) > (int(self.currentEndOfCycle)) and int(self.collectedSigData[1]['blockNumber']) > (int(self.currentEndOfCycle))):
-                        #if we are 100 blocks passed the last end of cycle then grab the new end of cycle block
-                        test = 1
-                        self.currentEndOfCycle = getEndOfCycleBlock()
-                        #create a thread which will wait 2hours before checking that the blocks have been relayed
-                        #Thread(target=self.checkEndOfCycle).start()
-                    else:
-                        test = 1
-                        #self.bot.send_message(self.settings["ChatID"],"ERROR: Failed to relay end of cycle on fuse net within 300 blocks!")
-
+                    #self.collectedSigData = grabDataFromGraphQL()
+                    printLogs("checkEnd")
+                    test = 1
+                    self.currentEndOfCycle = getEndOfCycleBlock()
+                    
                     self.incOldNodes()
                     #check to see if a vote is open
                     self.fillActiveBallots(getOpenBallots())
@@ -935,6 +1025,7 @@ class DownBot:
                         self.blockList[node].append(0)
                         self.flagErrors(node)
                     else:
+                        printLogs(str(node))
                         self.nodes[node]['lastBlock'] = lastSet[node]['lastBlock']
                         self.nodes[node]['missedCount'] = 0
                         self.nodes[node]['totalValidated'] += 1
@@ -942,7 +1033,7 @@ class DownBot:
 
                     self.nodes[node]['rollingAvgCount'] = self.blockList[node].count(1)
                     self.nodes[node]['rollingAvgTotal'] = len(self.blockList[node])
-                    self.nodes[node]['upTime'] = ((self.blockList[node].count(1))/(len(self.blockList[node]))) * 100
+                    self.nodes[node]['upTime'] = ((ROLLING_AVG_MAX - self.blockList[node].count(0))/(ROLLING_AVG_MAX)) * 100
             self.saveSettings(self.nodes, nodeList)
             self.saveSettings(self.settings, chatSettingsFile)
 
@@ -994,27 +1085,27 @@ class DownBot:
                     message += 'Eth balance low (' + str(balance['eth']) + ')\n'
                 if balance['fuse'] <= self.settings['FuseWarning']:
                     message += 'Fuse balance low (' + str(balance['fuse']) + ')\n'
-
+        #
                 if message != '':
                     user = ''
                     if 'username' in self.nodes[node]:
                         user = '@' + self.nodes[node]['username']
         
                     message = user + ' ' + str(node) + '\n' + message
-                    self.bot.send_message(self.settings["ChatID"], message)
+                    #self.bot.send_message(self.settings["ChatID"], message)
 
                 balance = getBalance('0xb093ba323d42bd1854235c81979DC27B2dA43887')
                 message = ''
                 if balance['eth'] <= self.settings["EthWarning"]:
                     message += 'Eth balance low (' + str(balance['eth']) + ')\n'
-
+        #
                 if message != '':
                     user = ''
                     if 'username' in self.nodes[node]:
                         user = '@' + self.nodes[node]['username']
 
                     message = user + ' ' + str('0xb093ba323d42bd1854235c81979DC27B2dA43887') + '\n' + message
-                    self.bot.send_message(self.settings["ChatID"], message)
+                    #self.bot.send_message(self.settings["ChatID"], message)
 
     def getNodes(self):
         return self.nodes
@@ -1030,6 +1121,18 @@ class DownBot:
 
     def getCirc(self):
         return self.stats['circSupply']
+
+    def getCircV2(self):
+        return self.stats['circSupplyV2']
+
+    def getCircVolt(self):
+        return self.stats['circSupplyVolt']
+
+    def getTotalVolt(self):
+        return self.stats['circSupplyVolt']['totalSupply']
+
+    def getWal(self):
+        return self.stats['wallets']
 
     def isAssigned(self, nodeId):
         retFlag = False
@@ -1091,9 +1194,6 @@ class DownBot:
         schedule.every().day.at("00:01").do(self.daily)
 
         updater.start_polling()
-
-        # worker = Thread(target=self.flaskThread)
-        # worker.start()
 
         while (1):
             schedule.run_pending()
@@ -1157,6 +1257,33 @@ def get_total_supply_simple():
 
     return jsonify(supply['supply'])
 
+@app.route('/api/v1/stats/circulatingVolt', methods=['GET'])
+@cross_origin()
+def get_circulating_supply_volt():
+    circ = downBot.getCircVolt()
+
+    return jsonify(circ)
+
+@app.route('/api/v1/stats/totalSupplyVolt', methods=['GET'])
+@cross_origin()
+def get_total_supply_volt():
+    circ = downBot.getTotalVolt()
+
+    return jsonify(circ)
+
+@app.route('/api/v1/stats/circulatingVolt_simple', methods=['GET'])
+@cross_origin()
+def get_circulating_supply_volt_simple():
+    circ = downBot.getCircVolt()
+
+    return jsonify(circ['circSupply'])
+
+@app.route('/api/v1/stats/totalSupplyVolt_simple', methods=['GET'])
+@cross_origin()
+def get_total_supply_volt_simple():
+    circ = downBot.getCircVolt()
+
+    return jsonify(circ['totalSupply'])
 
 @app.route('/api/v1/stats/circulating', methods=['GET'])
 @cross_origin()
@@ -1165,6 +1292,19 @@ def get_circulating_supply():
 
     return jsonify(circ)
 
+@app.route('/api/v2/stats/circulating', methods=['GET'])
+@cross_origin()
+def get_circulating_supply_v2():
+    circ = downBot.getCircV2()
+
+    return jsonify(circ)
+
+@app.route('/api/v1/stats/wallets', methods=['GET'])
+@cross_origin()
+def get_wallet_totals():
+    wal = downBot.getWal()
+
+    return jsonify(wal)
 
 @app.route('/api/v1/stats/circulating_simple', methods=['GET'])
 @cross_origin()
@@ -1252,6 +1392,17 @@ def get_task(node_id):
         abort(404, description="node not found")
     return jsonify({'Node': node})
 
+@app.route('/api/v1/old_node=<node_id>', methods=['GET'])
+@cross_origin()
+def get_task_old(node_id):
+    nodes = downBot.getOldNodes()
+    if node_id not in nodes:
+        abort(404, description="node not found")
+
+    node = nodes[node_id]
+    if len(node) == 0:
+        abort(404, description="node not found")
+    return jsonify({'Node': node})
 
 @app.route('/api/v1/checkSumAddr=<node_id>', methods=['GET'])
 @cross_origin()
@@ -1353,3 +1504,5 @@ if __name__ == '__main__':
     worker.start()
 
     downBot.start()
+
+

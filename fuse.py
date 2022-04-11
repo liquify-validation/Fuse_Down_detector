@@ -13,6 +13,9 @@ import collections
 import errno
 from socket import error as socket_error
 import time
+from autoscraper import AutoScraper
+from utils import create_contract, fetch_events
+import private
 
 HOURS_TO_SEARCH_BACK = 3
 
@@ -28,7 +31,7 @@ def lastBlock():
 
 def getBalance(node):
     DECIMAL = 10 ** 18
-    web3Eth = Web3(Web3.HTTPProvider("https://mainnet.infura.io/v3/"))
+    web3Eth = Web3(Web3.HTTPProvider(private.INFURA))
     web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
     ADDR = Web3.toChecksumAddress(node)
 
@@ -40,6 +43,20 @@ def getBalance(node):
     balance['fuse'] = fuseBalance
 
     return balance
+
+def grabWallets():
+    url = 'https://api.covalenthq.com/v1/1/tokens/0x970b9bb2c0444f5e81e9d0efb84c8ccdcdcaf84d/token_holders/?key=ckey_' + private.COVALENT_KEY
+    eth = json.loads(requests.get(url).text)['data']['pagination']['total_count']
+    url = 'https://api.covalenthq.com/v1/56/tokens/0x5857c96dae9cf8511b08cb07f85753c472d36ea3/token_holders/?key=ckey_' + private.COVALENT_KEY
+    bsc = json.loads(requests.get(url).text)['data']['pagination']['total_count']
+    wanted_list = ["Validators"]
+    scraper = AutoScraper()
+    url = 'https://explorer.fuse.io/'
+    fuse = scraper.build(url, wanted_list)[1].replace(',', '')
+
+    wallets = {'eth': eth, 'bsc': bsc, 'fuse': fuse}
+
+    return wallets
 
 def getValStats():
     DECIMAL = 10 ** 18
@@ -78,11 +95,23 @@ def getTotalDelegates():
 def getTotalSupply(block):
     initSupply = 300000000
     blocksPerYear = 6307200
+    
+    burnt = 8173860.51897
+    rewardsADDR = "0x63D4efeD2e3dA070247bea3073BCaB896dFF6C9B"
+    
+    web3Fuse = Web3(Web3.HTTPProvider(contractABI.RPC_ADDRESS))
+    
+    rewardContract = create_contract(web3Fuse, REWARDS_CONTRACT, Web3.toChecksumAddress(str(rewardsADDR)))
 
-    firstYearReward = 15000000/blocksPerYear
-    secondYearReward = firstYearReward * 1.05
+    rewards = list(fetch_events(lpContract.events.RewardedOnCycle,from_block=1))
+    total = 0
 
-    totalSupply = initSupply + ((blocksPerYear - 100) * firstYearReward) + ((block - blocksPerYear) * secondYearReward) - 8173860.51897
+    for re in rewards:
+        total += re.args['amount']
+
+    total = total/10**18
+
+    totalSupply = initSupply + total - burnt
 
     return totalSupply
 
@@ -91,7 +120,7 @@ def getCircSupply(totalSupply, block, lockedAccountsList):
 
     RPC_ADDRESS = contractABI.RPC_ADDRESS
     DECIMAL = 10 ** 18
-    web3Eth = Web3(Web3.HTTPProvider("https://mainnet.infura.io/v3/"))
+    web3Eth = Web3(Web3.HTTPProvider(private.INFURA))
     web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
     CONTRACT_ADDRESS = "0x970B9bB2C0444F5E81e9d0eFb84C8ccdcdcAf84d"
     WFUSE_CONTRACT = "0x0BE9e53fd7EDaC9F859882AfdDa116645287C629"
@@ -106,17 +135,23 @@ def getCircSupply(totalSupply, block, lockedAccountsList):
     for address in lockedAccountsList:
         addr = Web3.toChecksumAddress(address)
         fusenetBalance = float(web3Fuse.eth.getBalance(addr) / DECIMAL)
+        print("fuse locked " + address + " " + str(fusenetBalance))
         circSupplyFuse = circSupplyFuse - fusenetBalance
+        wFuseAmount = float(wrappedFuseContract.functions.balanceOf(address).call() / DECIMAL)
+        circSupplyFuse = circSupplyFuse - wFuseAmount
     
     wFuseAmount = float(wrappedFuseContract.functions.balanceOf(wfuseWallet).call() / DECIMAL)
 
-    circSupplyFuse = circSupplyFuse - wFuseAmount + 8173860.51897
+    print("wfuse " + str(wFuseAmount))
+
+    circSupplyFuse = circSupplyFuse - 8173860.51897
     
     circSupplyMain = totalSupplyMainnet
 
     for address in lockedAccountsList:
         addr = Web3.toChecksumAddress(address)
         mainnetBalance = float(tokenContract.functions.balanceOf(addr).call() / DECIMAL)
+        print("main locked " + address + " " + str(mainnetBalance))
         circSupplyMain = circSupplyMain - mainnetBalance
 
     stakedAmount = float(fuseConsensusContract.functions.totalStakeAmount().call() / DECIMAL)
@@ -133,35 +168,91 @@ def getCircSupply(totalSupply, block, lockedAccountsList):
 
     return returnDict
 
+def getTotalSupplyVolt():
+    DECIMAL = 10 ** 18
+    RPC_ADDRESS = contractABI.RPC_ADDRESS
+    web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
+    voltContract = web3Fuse.eth.contract(abi=contractABI.VOLT_CONTRACT, address=contractABI.VOLTS_ADDRESS)
+
+    totalVoltage = float(voltContract.functions.totalSupply().call() / DECIMAL)
+
+    return totalVoltage
+
+def getCircSupplyVolt(block,lockedAccountsList):
+    DECIMAL = 10 ** 18
+    total = getTotalSupplyVolt()
+    circ = total
+    RPC_ADDRESS = contractABI.RPC_ADDRESS
+    web3Fuse = Web3(Web3.HTTPProvider(RPC_ADDRESS))
+    voltContract = web3Fuse.eth.contract(abi=contractABI.VOLT_CONTRACT, address=contractABI.VOLTS_ADDRESS)
+
+    for address in lockedAccountsList:
+        addr = Web3.toChecksumAddress(address)
+        circ -= float(voltContract.functions.balanceOf(address).call() / DECIMAL)
+
+    returnDict = collections.OrderedDict()
+    returnDict['fuseBlock'] = block
+    returnDict['totalSupply'] = total
+    returnDict['circSupply'] = circ
+    returnDict['ratio'] = float(circ/total)
+    
+    return returnDict
+
+
+def getCircSupplyV2(totalSupply, block, lockedAccountsList):
+    returnDict = getCircSupply(totalSupply,block,lockedAccountsList)
+
+    web3BSC = Web3(Web3.HTTPProvider('https://bsc-dataseed.binance.org/'))
+
+    DECIMAL = 10 ** 18
+    CONTRACT_ADDRESS_BSC = Web3.toChecksumAddress("0x5857c96dae9cf8511b08cb07f85753c472d36ea3")
+    tokenContractBSC = web3BSC.eth.contract(abi=contractABI.TOKEN_CONTRACT_ABI, address=CONTRACT_ADDRESS_BSC)
+    totalSupplyBSC = float(tokenContractBSC.functions.totalSupply().call() / DECIMAL)
+
+    returnDict['bscBlock'] = web3BSC.eth.blockNumber
+    returnDict['total'] = returnDict['total'] + totalSupplyBSC
+    returnDict['onBSCNetwork'] = totalSupplyBSC
+    
+    return returnDict
 
 def log_loop(web3Fuse, poll_interval,blockQueue):
     oldBlockNumber = 0
     while True:
         try:
             newBlock = web3Fuse.eth.blockNumber
-            if (oldBlockNumber != newBlock):
-                if (oldBlockNumber + 1 != newBlock) and oldBlockNumber != 0:
-                    print("missedBlocks")
-                    while (oldBlockNumber + 1 != newBlock):
-                        oldBlockNumber += 1
-                        block = web3Fuse.eth.getBlock(oldBlockNumber)
-                        blockDetails = {}
-                        blockDetails['block'] = oldBlockNumber
-                        blockDetails['miner'] = block['miner']
-                        blockDetails['timeStamp'] = block['timestamp']
-                        blockDetails['numTransactions'] = len(block.transactions)
-                        blockDetails['gasUsed'] = block.gasUsed
-                        blockQueue.put(blockDetails)
-                time.sleep(0.4)
-                block = web3Fuse.eth.getBlock(newBlock)
-                blockDetails = {}
-                blockDetails['block'] = newBlock
-                blockDetails['miner'] = block['miner']
-                blockDetails['timeStamp'] = block['timestamp']
-                blockDetails['numTransactions'] = len(block.transactions)
-                blockDetails['gasUsed'] = block.gasUsed
-                blockQueue.put(blockDetails)
-                oldBlockNumber = newBlock
+            if newBlock > oldBlockNumber:
+                if (oldBlockNumber != newBlock):
+                    if (oldBlockNumber + 1 != newBlock) and oldBlockNumber != 0:
+                        print("missedBlocks")
+                        while (oldBlockNumber + 1 != newBlock):
+                            print("ob: " + str(oldBlockNumber) + " nb: " + str(newBlock))
+                            oldBlockNumber += 1
+                            try:
+                                block = web3Fuse.eth.getBlock(oldBlockNumber)
+                                blockDetails = {}
+                                blockDetails['block'] = oldBlockNumber
+                                blockDetails['miner'] = block['miner']
+                                blockDetails['timeStamp'] = block['timestamp']
+                                blockDetails['numTransactions'] = len(block.transactions)
+                                blockDetails['gasUsed'] = block.gasUsed
+                                blockQueue.put(blockDetails)
+                            except BaseException as e:
+                                print(str(e))
+                                continue
+                time.sleep(0.6)
+                try:
+                    block = web3Fuse.eth.getBlock(newBlock)
+                    blockDetails = {}
+                    blockDetails['block'] = newBlock
+                    blockDetails['miner'] = block['miner']
+                    blockDetails['timeStamp'] = block['timestamp']
+                    blockDetails['numTransactions'] = len(block.transactions)
+                    blockDetails['gasUsed'] = block.gasUsed
+                    blockQueue.put(blockDetails)
+                    oldBlockNumber = newBlock
+                except BaseException as e:
+                    print(str(e))
+                    continue
             time.sleep(poll_interval)
         except (socket_error, KeyError) as serr:
             print("Caught connection exception")
@@ -196,7 +287,7 @@ def checkIfRelayed(address):
     #check if a transcation has been sent to the consensus within the last 3 hours
     time_now_utc = datetime.utcnow()
     unixtime = calendar.timegm(time_now_utc.utctimetuple())
-    api = Account(address=Web3.toChecksumAddress(address), api_key="")
+    api = Account(address=Web3.toChecksumAddress(address), api_key=private.ETHER_SCAN)
     transactions = api.get_transaction_page(page=1, offset=10, sort='des',
                                             internal=False)
 
@@ -256,3 +347,5 @@ def getBallotResults(ballotID):
         (abstained / totalValidators) * 100) + '%)'
 
     return stringToRet
+
+
